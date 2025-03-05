@@ -1,159 +1,149 @@
-# ui/main_window.py
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                             QLabel, QListWidget, QTextEdit, QProgressBar, QMenu, QStackedWidget)
-from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QAction
-from core.repo_manager import RepoManager
-from core.pdf_generator import PDFGenerator
-from core.llm_optimizer import LLMOptimizer
-from ui.dashboard import Dashboard
-from ui.formatting_toolbox import FormattingToolbox
-from ui.settings_dialog import SettingsDialog
-from utils.styles import apply_neon_stylesheet
-from utils.animations import fade_in
-from utils.logger import logger
+from PyQt6 import QtWidgets, QtGui, QtCore
+from ui.widgets import FileListWidget
+from core.repo_handler import clone_repository, get_folder_contents
+from core.pdf_generator import generate_pdf
+from utils.helpers import format_size
+import os
 
-class MainWindow(QMainWindow):
+class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Repo to PDF Generator")
-        self.repo_manager = RepoManager(self)
-        self.pdf_generator = PDFGenerator()
-        self.llm_optimizer = LLMOptimizer()
+        self.setWindowTitle("Project to PDF Generator")
+        self.root_folder = None
+        self.current_path = ""
+        self.selection_states = {}
         self.setup_ui()
-        self.connect_signals()
-        self.setAcceptDrops(True)
-        self.show_dashboard()
 
     def setup_ui(self):
-        # Central widget with stacked layout
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.stack = QStackedWidget()
-        main_layout = QVBoxLayout(self.central_widget)
-        main_layout.addWidget(self.stack)
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
 
-        # Main UI widget
-        self.main_widget = QWidget()
-        self.main_layout = QVBoxLayout(self.main_widget)
+        # Sidebar: Tree View
+        self.tree_view = QtWidgets.QTreeView()
+        self.tree_model = QtGui.QFileSystemModel()  # Corrected import
+        self.tree_model.setRootPath(QtCore.QDir.rootPath())
+        self.tree_view.setModel(self.tree_model)
+        self.tree_view.setMaximumWidth(300)
+        self.tree_view.selectionModel().selectionChanged.connect(self.update_list_widget)
+        main_layout.addWidget(self.tree_view)
+
+        # Main Content Area
+        content_layout = QtWidgets.QVBoxLayout()
 
         # Top Bar
-        top_bar = QHBoxLayout()
-        self.open_button = QPushButton("Open Repo")
-        self.generate_button = QPushButton("Generate PDF")
-        self.format_button = QPushButton("Format")
-        self.settings_button = QPushButton("Settings")
-        top_bar.addWidget(self.open_button)
-        top_bar.addWidget(self.generate_button)
-        top_bar.addWidget(self.format_button)
-        top_bar.addWidget(self.settings_button)
-        top_bar.addStretch()
-        self.main_layout.addLayout(top_bar)
+        top_layout = QtWidgets.QHBoxLayout()
+        self.open_button = QtWidgets.QPushButton("Open Folder")
+        self.open_button.clicked.connect(self.open_folder)
+        top_layout.addWidget(self.open_button)
 
-        # Main Content
-        content_layout = QHBoxLayout()
-        self.sidebar = QListWidget()
-        self.sidebar.setMaximumWidth(250)
-        self.preview_pane = QTextEdit()
-        self.preview_pane.setReadOnly(True)
-        self.pdf_preview = QTextEdit()
-        self.pdf_preview.setReadOnly(True)
-        content_layout.addWidget(self.sidebar, 1)
-        content_layout.addWidget(self.preview_pane, 2)
-        content_layout.addWidget(self.pdf_preview, 2)
-        self.main_layout.addLayout(content_layout)
+        self.add_repo_button = QtWidgets.QPushButton("Add Repository")
+        self.add_repo_button.clicked.connect(self.add_repository)
+        top_layout.addWidget(self.add_repo_button)
 
-        # Bottom Dock
-        dock_layout = QHBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.status_label = QLabel("Ready")
-        dock_layout.addWidget(self.progress_bar)
-        dock_layout.addStretch()
-        dock_layout.addWidget(self.status_label)
-        self.main_layout.addLayout(dock_layout)
+        self.path_label = QtWidgets.QLabel("No folder selected")
+        top_layout.addWidget(self.path_label)
+        top_layout.addStretch()
+        content_layout.addLayout(top_layout)
 
-        # Dashboard and Toolbox
-        self.dashboard = Dashboard(self.repo_manager, self)
-        self.toolbox = FormattingToolbox(self)
-        self.toolbox.hide()
+        # File List Widget
+        self.list_widget = FileListWidget(self)
+        content_layout.addWidget(self.list_widget)
 
-        # Add widgets to stack
-        self.stack.addWidget(self.dashboard)
-        self.stack.addWidget(self.main_widget)
+        # Selection Controls
+        selection_layout = QtWidgets.QHBoxLayout()
+        self.select_all_button = QtWidgets.QPushButton("Select All")
+        self.select_all_button.clicked.connect(lambda: self.list_widget.toggle_selection(True))
+        selection_layout.addWidget(self.select_all_button)
 
-        apply_neon_stylesheet(self)
-        # fade_in(self)
+        self.deselect_all_button = QtWidgets.QPushButton("Deselect All")
+        self.deselect_all_button.clicked.connect(lambda: self.list_widget.toggle_selection(False))
+        selection_layout.addWidget(self.deselect_all_button)
 
-    def connect_signals(self):
-        self.open_button.clicked.connect(self.repo_manager.open_repo_dialog)
+        self.filter_combo = QtWidgets.QComboBox()
+        self.filter_combo.addItems(["All", ".py", ".txt", ".md"])
+        self.filter_combo.currentTextChanged.connect(self.update_list_widget)
+        selection_layout.addWidget(self.filter_combo)
+        content_layout.addLayout(selection_layout)
+
+        # Generate Button
+        self.generate_button = QtWidgets.QPushButton("Generate PDF")
         self.generate_button.clicked.connect(self.generate_pdf)
-        self.format_button.clicked.connect(self.show_toolbox)
-        self.settings_button.clicked.connect(self.show_settings)
-        self.sidebar.itemClicked.connect(self.show_preview)
-        self.sidebar.customContextMenuRequested.connect(self.show_context_menu)
-        self.repo_manager.repo_updated.connect(self.update_sidebar)
+        content_layout.addWidget(self.generate_button)
 
-    def show_dashboard(self):
-        self.stack.setCurrentWidget(self.dashboard)
+        main_layout.addLayout(content_layout)
 
-    def hide_dashboard(self):
-        self.stack.setCurrentWidget(self.main_widget)
+        # Styling (shades of black and grey)
+        self.setStyleSheet("""
+            QWidget { background-color: #1E1E1E; color: #D3D3D3; font-family: Arial; }
+            QPushButton { background-color: #333333; padding: 8px; border: 1px solid #444444; }
+            QPushButton:hover { background-color: #444444; }
+            QTreeView, QListWidget { background-color: #2A2A2A; border: 1px solid #333333; }
+            QLabel { color: #A9A9A9; }
+            QComboBox { background-color: #2A2A2A; border: 1px solid #333333; }
+        """)
 
-    def update_sidebar(self):
-        self.sidebar.clear()
-        for item_data in self.repo_manager.get_current_items():
-            item = item_data["item"]
-            self.sidebar.addItem(item)
-        self.status_label.setText(f"Loaded: {self.repo_manager.current_dir}")
-
-    def show_preview(self, item):
-        rel_path = item.data(Qt.ItemDataRole.UserRole)
-        abs_path = self.repo_manager.get_absolute_path(rel_path)
-        try:
-            with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                self.preview_pane.setText(f.read())
-        except Exception:
-            self.preview_pane.setText("Cannot preview this file.")
-
-    def show_context_menu(self, pos: QPoint):
-        item = self.sidebar.itemAt(pos)
-        if not item:
-            return
-        menu = QMenu(self)
-        select_all = QAction("Select All Children", self)
-        deselect_all = QAction("Deselect All Children", self)
-        menu.addAction(select_all)
-        menu.addAction(deselect_all)
-        select_all.triggered.connect(lambda: self.repo_manager.select_all_children(item))
-        deselect_all.triggered.connect(lambda: self.repo_manager.deselect_all_children(item))
-        menu.exec(self.sidebar.mapToGlobal(pos))
-
-    def generate_pdf(self):
-        self.progress_bar.setVisible(True)
-        settings = self.toolbox.get_settings()
-        self.llm_optimizer.set_chunk_size(settings["chunk_size"])
-        self.pdf_generator.generate_pdf(self.repo_manager, self.preview_pdf, self.progress_bar)
-        self.progress_bar.setVisible(False)
-
-    def preview_pdf(self, content: str):
-        self.pdf_preview.setText(content)
-
-    def show_toolbox(self):
-        self.toolbox.show()
-
-    def show_settings(self):
-        dialog = SettingsDialog(self)
-        dialog.exec()
+        # Drag and Drop
+        self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() or event.mimeData().hasText():
-            event.acceptProposedAction()
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
 
     def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            url = event.mimeData().urls()[0].toString()
-            self.repo_manager.open_repo(url)
-        elif event.mimeData().hasText():
-            self.repo_manager.open_repo(event.mimeData().text())
-        self.hide_dashboard()
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if os.path.isdir(path):
+                self.set_root_folder(path)
+            elif path.startswith("http"):
+                self.add_repository_from_url(path)
+
+    def open_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.set_root_folder(folder)
+
+    def add_repository(self):
+        url, ok = QtWidgets.QInputDialog.getText(self, "Add Repository", "Enter URL:")
+        if ok and url:
+            self.add_repository_from_url(url)
+
+    def add_repository_from_url(self, url):
+        try:
+            folder = clone_repository(url)
+            self.set_root_folder(folder)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Error", f"Failed to clone repository: {e}")
+
+    def set_root_folder(self, folder):
+        self.root_folder = folder
+        self.current_path = ""
+        self.selection_states = {}
+        self.tree_model.setRootPath(folder)
+        root_index = self.tree_model.index(folder)
+        self.tree_view.setRootIndex(root_index)
+        self.update_list_widget()
+
+    def update_list_widget(self):
+        selected = self.tree_view.selectedIndexes()
+        path = self.root_folder if not selected else self.tree_model.filePath(selected[0])
+        self.current_path = os.path.relpath(path, self.root_folder) if self.root_folder else ""
+        self.path_label.setText(path)
+        filter_ext = self.filter_combo.currentText() if self.filter_combo.currentText() != "All" else None
+        self.list_widget.update_contents(path, filter_ext)
+
+    def generate_pdf(self):
+        if not self.root_folder:
+            QtWidgets.QMessageBox.warning(self, "Error", "No folder selected.")
+            return
+        selected_files = self.list_widget.get_selected_files()
+        if not selected_files:
+            QtWidgets.QMessageBox.warning(self, "Error", "No files selected.")
+            return
+        pdf_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save PDF", filter="PDF Files (*.pdf)")
+        if pdf_path:
+            generate_pdf(self.root_folder, selected_files, pdf_path)
+            QtWidgets.QMessageBox.information(self, "Success", f"PDF saved at: {pdf_path}")
